@@ -1,40 +1,57 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
-const cors = require('cors');
+const { Buffer } = require('buffer');
 
 const app = express();
-app.use(cors());
+const PORT = process.env.PORT || 3000;
+
+// ✅ Use environment variables
+const SECRET_KEY = Buffer.from(process.env.SECRET_KEY, 'utf-8'); // 32 bytes
+const AUTH_TOKEN = process.env.AUTH_TOKEN;
+const IV_LENGTH = 16;
+const TIMESTAMP_EXPIRY_MS = 60 * 1000; // 60 seconds
+
 app.use(bodyParser.json());
 
-const SECRET_KEY = "ThisIsASecretKeyForAES256!!!"; // 32 bytes
-const IV_LENGTH = 16;
-
-function decrypt(encryptedBase64) {
-    const encrypted = Buffer.from(encryptedBase64, 'base64');
-    const iv = encrypted.slice(0, IV_LENGTH);
-    const content = encrypted.slice(IV_LENGTH);
-
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(SECRET_KEY), iv);
-    let decrypted = decipher.update(content);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-
-    return decrypted.toString();
+function decrypt(encrypted) {
+    const rawData = Buffer.from(encrypted, 'base64');
+    const iv = rawData.slice(0, IV_LENGTH);
+    const encryptedText = rawData.slice(IV_LENGTH);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', SECRET_KEY, iv);
+    let decrypted = decipher.update(encryptedText, undefined, 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
 }
 
 app.post('/decrypt', (req, res) => {
+    const clientAuth = req.headers['authorization'];
+    const payload = req.body.payload;
+
+    if (!clientAuth || clientAuth !== `Bearer ${AUTH_TOKEN}`) {
+        console.log(`[${new Date().toISOString()}] ❌ Unauthorized request`);
+        return res.status(403).json({ error: 'Unauthorized' });
+    }
+
     try {
-        const encrypted = req.body.payload;
-        const message = decrypt(encrypted);
-        console.log("Decrypted:", message);
-        res.json({ decrypted: message });
+        const decrypted = decrypt(payload);
+        const parsed = JSON.parse(decrypted);
+
+        const timestamp = parsed.timestamp;
+        if (!timestamp || Math.abs(Date.now() - timestamp) > TIMESTAMP_EXPIRY_MS) {
+            console.log(`[${new Date().toISOString()}] ⚠️ Replay attack blocked`);
+            return res.status(400).json({ error: 'Timestamp expired or missing' });
+        }
+
+        console.log(`[${new Date().toISOString()}] ✅ Valid request from client`);
+        return res.status(200).json({ decrypted: parsed.data });
+
     } catch (err) {
-        console.error(err);
-        res.status(400).json({ error: "Decryption failed" });
+        console.error(`[${new Date().toISOString()}] ❌ Decryption failed`, err.message);
+        return res.status(400).json({ error: 'Bad request' });
     }
 });
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🔐 Secure Server running on port ${PORT}`);
 });
